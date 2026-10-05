@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""BRL AutoAttack + L2 独立评估脚本 (P0优先级)
-用法:
+"""BRL AutoAttack + L2 independent evaluation script
+Usage:
     python3 brl_autoattack_eval.py --ckpt ckpt/brl_rn18_at.pth --dataset cifar10 \
         --bits 32 4 3 2 --norm L2 --eps 0.5 --limit 1000 --out results/brl_at_l2.json
 """

@@ -1,18 +1,18 @@
 """
-方向A · E5 混合精度鲁棒感知位宽分配 (brl_e5.py)
+E5 mixed-precision, robustness-aware bitwidth allocation (brl_e5.py)
 ================================================
-RQ4: 在鲁棒目标下, 各层对位宽压缩的敏感度不同——哪些层必须保高位宽、哪些可降?
-E5 分两步:
-  Part A 逐层鲁棒灵敏度扫描:
-    对 ResNet-18 每个 Conv2d/Linear 层, 单独把该层权重量化到 INT3(其余层保持全精度),
-    测 clean/robust(PGD-20) 损失 -> "单层降位宽鲁棒损失"谱, 排序识别鲁棒关键层。
-  Part B 鲁棒感知混合精度分配:
-    给定平均位宽预算(默认 ~4.0 bit), 令"鲁棒最敏感层"(累计参数≈20%)保持 INT8,
-    其余层降到 INT3, 使参数加权平均位宽≈4.0; 与"均匀 INT4"(所有层 4.0)对比 clean/robust,
-    展示在相近平均位宽下, 鲁棒感知分配比均匀分配更好地守住鲁棒。
+RQ4: under a robustness objective, layers differ in sensitivity to bitwidth compression - which layers must keep high bitwidth and which can be lowered?
+E5 proceeds in two parts:
+  Part A per-layer robustness-sensitivity scan:
+    For each Conv2d/Linear layer of ResNet-18, quantize only that layer's weights to INT3 (others stay full-precision),
+    measuring the clean/robust (PGD-20) loss -> a per-layer robustness-loss spectrum, ranked to identify robustness-critical layers.
+  Part B robustness-aware mixed-precision allocation:
+    Given an average bitwidth budget (default ~4.0 bit), keep the most robustness-sensitive layers (~20% cumulative params) at INT8,
+    lowering the rest to INT3 so the parameter-weighted average bitwidth ~= 4.0; compare clean/robust with uniform INT4 (all layers 4.0),
+    showing that, at similar average bitwidth, robustness-aware allocation preserves robustness better than uniform allocation.
 
-依赖: brl_quant.py(同目录), brl_e3.py 的 evaluate/pgd(复用 _norm_pixel_bounds 修复版)。
-用法(GPU, AT 骨干就绪后):
+Depends on: brl_quant.py (same dir), and brl_e3.py's evaluate/pgd (reusing the fixed _norm_pixel_bounds).
+Usage (GPU, once the AT backbone is ready):
     python brl_e5.py --ckpt ckpt/brl_rn18_at.pth --pgd-iter 20 --eps 0.03125 --out brl_e5.json
 """
 from __future__ import annotations
@@ -32,18 +32,18 @@ import brl_quant as BQ
 from brl_scan import build_model, load_cifar10
 from brl_e3 import _norm_pixel_bounds, pgd_attack, evaluate_clean_robust
 
-# 量化时替换/恢复的模块类型
+# module types replaced/restored during quantization
 MOD = (nn.Conv2d, nn.Conv1d, nn.Linear)
 
 
 def named_weight_modules(model: nn.Module):
-    """返回 (name, module) 列表, 仅含带权重的卷积/线性层。"""
+    """Return a (name, module) list containing only weight-bearing conv/linear layers."""
     return [(n, m) for n, m in model.named_modules()
             if isinstance(m, MOD) and hasattr(m, "weight")]
 
 
 def apply_layer_bits(model: nn.Module, layer_bits, backup):
-    """按 {name: bits} 逐层应用量化(就地)。bits>=32 表示保全精度。用 backup 恢复的原始权重做量化源。"""
+    """Apply quantization per layer according to {name: bits} (in place). bits>=32 keeps full precision. Quantization uses the original weights restored from backup."""
     for name, bits in layer_bits.items():
         m = model
         for part in name.split("."):
@@ -55,7 +55,7 @@ def apply_layer_bits(model: nn.Module, layer_bits, backup):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BRL E5 混合精度鲁棒感知位宽分配")
+    ap = argparse.ArgumentParser(description="BRL E5 mixed-precision robustness-aware bitwidth allocation")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--model", default="resnet18")
     ap.add_argument("--data-root", default="./data")
@@ -63,10 +63,10 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--eps", type=float, default=8 / 255)
     ap.add_argument("--pgd-iter", type=int, default=20)
-    ap.add_argument("--single-lb", type=int, default=3, help="Part A 单层量化位宽")
+    ap.add_argument("--single-lb", type=int, default=3, help="Part A single-layer quantization bitwidth")
     ap.add_argument("--key-param-frac", type=float, default=0.20,
-                    help="Part B 保 INT8 的敏感层累计参数占比")
-    ap.add_argument("--nonkey-bits", type=int, default=3, help="Part B 非关键层位宽")
+                    help="Part B cumulative parameter fraction of sensitive layers kept at INT8")
+    ap.add_argument("--nonkey-bits", type=int, default=3, help="Part B non-critical-layer bitwidth")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="brl_e5.json")
     args = ap.parse_args()
@@ -88,12 +88,12 @@ def main():
     print(f"[E5] ckpt={args.ckpt} device={device} layers={len(wmods)} "
           f"layer_param={nparam} total_param={total_param}", flush=True)
 
-    # ---- 全精度基准 ----
+    # ---- full-precision baseline ----
     c0, r0 = evaluate_clean_robust(copy.deepcopy(base), loader, device,
                                    eps=args.eps, pgd_iters=args.pgd_iter)
     print(f"[E5] FP32: clean={c0:.2f}% robust={r0:.2f}%", flush=True)
 
-    # ---- Part A: 逐层单层量化(INT3) 鲁棒灵敏度 ----
+    # ---- Part A: per-layer single-layer quantization (INT3) robustness sensitivity ----
     backup = BQ.make_weight_backup(base)
     sens = []
     for name, m in wmods:
@@ -117,14 +117,14 @@ def main():
               f"dRob={drob:+6.2f} ({time.time()-t0:.0f}s)", flush=True)
         del b
 
-    # 按鲁棒损失降序排序(损失越大=越关键)
+    # sort by robustness loss descending (larger loss = more critical)
     sens.sort(key=lambda x: -x["d_robust"])
-    print("\n[E5] 鲁棒敏感度排序(降序, 越靠前越关键, 需保高位宽):", flush=True)
+    print("\n[E5] Robustness-sensitivity ranking (descending; earlier = more critical, keep high bitwidth):", flush=True)
     for s in sens:
         print(f"  {s['layer']:<24} dRob={s['d_robust']:+6.2f}  param={s['param']}", flush=True)
 
-    # ---- Part B: 鲁棒感知混合精度 v.s. 均匀 INT4 ----
-    # B1: 均匀 INT4(全体层 4 bits)
+    # ---- Part B: robustness-aware mixed precision vs. uniform INT4 ----
+    # B1: uniform INT4 (all layers at 4 bits)
     b_uniform = copy.deepcopy(base)
     ub = BQ.make_weight_backup(b_uniform)
     for name, m in named_weight_modules(b_uniform):
@@ -133,23 +133,23 @@ def main():
                                                per_channel=True, ch_dim=0)
     cu, ru = evaluate_clean_robust(b_uniform, loader, device,
                                    eps=args.eps, pgd_iters=args.pgd_iter)
-    print(f"[B] 均匀INT4: clean={cu:.2f}% robust={ru:.2f}%", flush=True)
+    print(f"[B] uniform INT4: clean={cu:.2f}% robust={ru:.2f}%", flush=True)
 
-    # B2: 混合配置——取累计参数占比≈key_frac 的最敏感层保 INT8, 其余非关键层降 nonkey_bits
+    # B2: mixed config - keep the most sensitive layers (cumulative ~key_frac) at INT8, lower the rest to nonkey_bits
     cum, key_names, total_key_param = 0.0, [], 0.0
-    for s in sens:  # sens 已按 d_robust 降序
+    for s in sens:  # sens is already sorted by d_robust descending
         if cum >= args.key_param_frac:
             break
         key_names.append(s["layer"])
         cum += s["param"] / nparam
         total_key_param += s["param"]
-    print(f"[B] 关键层(保INT8, 累计参数占比={cum:.3f}): {key_names}", flush=True)
+    print(f"[B] critical layers (kept at INT8, cumulative param fraction={cum:.3f}): {key_names}", flush=True)
 
     layer_bits = {}
     mix_param = 0.0
     for name, m in wmods:
         if name in key_names:
-            layer_bits[name] = None  # 保持全精度(INT8 以上即全精度)
+            layer_bits[name] = None  # keep full precision (INT8+ counts as full precision)
             mix_param += 8.0 * m.weight.numel()
         else:
             layer_bits[name] = args.nonkey_bits
@@ -161,9 +161,9 @@ def main():
     apply_layer_bits(b_mix, layer_bits, mb)
     cm, rm = evaluate_clean_robust(b_mix, loader, device,
                                    eps=args.eps, pgd_iters=args.pgd_iter)
-    print(f"[B] 鲁棒感知混合(avg={avg_bits:.2f}bits): clean={cm:.2f}% robust={rm:.2f}%", flush=True)
+    print(f"[B] robustness-aware mixed (avg={avg_bits:.2f}bits): clean={cm:.2f}% robust={rm:.2f}%", flush=True)
 
-    # ---- 输出 ----
+    # ---- output ----
     out = {
         "meta": {"ckpt": args.ckpt, "model": args.model, "pgd_iters": args.pgd_iter,
                  "eps": args.eps, "single_lb": args.single_lb,

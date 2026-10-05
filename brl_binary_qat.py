@@ -1,24 +1,24 @@
 """
-方向A · 二值/超低位宽鲁棒基线 (brl_binary_qat.py)
+Binary / ultra-low-bitwidth robust baseline (brl_binary_qat.py)
 ====================================================
-目的: 检验"针对低位宽专门训练的鲁棒方法(QAT, 二值化/Binary Robust QAT)"能否
-恢复 E1 中 direct PTQ 在 INT2/INT1 处的崩塌, 为 RA-BNN 式二值鲁棒方法提供诚实基线对照。
+Goal: test whether a robust method specialized for low bitwidths (QAT, binary / Binary Robust QAT) can
+recover the INT2/INT1 collapse of direct PTQ in E1, providing an honest baseline for RA-BNN-style binary robust methods.
 
-方法:
-  - 训练期间对每个 Conv2d/Linear 权重做 fake-quant(STE, 见 brl_quant.fake_quant_ste),
-    使模型"量化为 bits 位"仍保持有效梯度 -> 这是二值化/超低位宽 QAT 的标准做法。
-  - 训练目标沿用模式 at(PGD-AT) 或 ce。默认 at, 因为 RA-BNN 类方法都是鲁棒训练。
-  - 训练出的 QAT 模型部署在 bits 位: 评估时再 PTQ 该权重到 {bits, bits-1, 4} 全谱, 看低 bit 鲁棒。
+Method:
+  - During training, apply fake-quant (STE, see brl_quant.fake_quant_ste) to every Conv2d/Linear weight,
+    keeping valid gradients for the bits-bit quantized model - standard practice for binary/ultra-low-bitwidth QAT.
+  - Training objective follows mode at (PGD-AT) or ce. Default at, as RA-BNN-like methods use robust training.
+  - The trained QAT model deploys at bits: at evaluation, PTQ the weights to the {bits, bits-1, 4} spectrum to inspect low-bit robustness.
 
-对比基线: E1 tab:e1 中 INT2/INT1 直接 PTQ(无专门训练) = 崩塌(~6-10%)。
-本实验 QAT-bits 应显著高于该崩塌水平, 才是"专门方法可恢复低位宽鲁棒"的证据。
+Baseline: INT2/INT1 direct PTQ (no specialized training) in E1 tab:e1 collapses to ~6-10%.
+This experiment should score significantly above that collapse to evidence that specialized methods recover low-bitwidth robustness.
 
-用法:
-    # 2-bit QAT 鲁棒训练 (AT, PGD-20)
+Usage:
+    # 2-bit QAT robust training (AT, PGD-20)
     python brl_binary_qat.py --mode at --bits 2 --epochs 80 --out ckpt/brl_rn18_qat2.pth --log brl_qat2.log
-    # 1-bit QAT 鲁棒训练
+    # 1-bit QAT robust training
     python brl_binary_qat.py --mode at --bits 1 --epochs 80 --out ckpt/brl_rn18_qat1.pth --log brl_qat1.log
-依赖: torch, torchvision, brl_quant, brl_train(get_loaders/build_model/set_seed/pgd_attack/evaluate)
+Depends on: torch, torchvision, brl_quant, brl_train (get_loaders/build_model/set_seed/pgd_attack/evaluate)
 """
 from __future__ import annotations
 import argparse, time, os
@@ -58,13 +58,13 @@ def _replace(model: nn.Module, name: str, q: nn.Module):
     parent = model
     for p in parts[:-1]:
         parent = getattr(parent, p)
-    # key 可能是 str(普通子模块)或 int(Sequential 内元素)
+    # key can be str (regular submodule) or int (elements inside a Sequential)
     key = parts[-1]
     parent._modules[key if isinstance(key, int) else key] = q
 
 
 def wrap_qat(model: nn.Module, bits: int) -> nn.Module:
-    """把 model 中 Conv2d/Linear 原位替换为 STE 量化版本(保留 BN/ReLU/pool/bias)。"""
+    """Replace Conv2d/Linear modules in model in place with STE-quantized versions (preserving BN/ReLU/pool/bias)."""
     for name, m in list(model.named_modules()):
         if isinstance(m, nn.Conv2d):
             q = QuantConv2d(m, bits)

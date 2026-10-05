@@ -1,21 +1,21 @@
 """
-方向A · P0 BRL 冒烟主脚本 (brl_smoke.py)
+P0 BRL smoke main script (brl_smoke.py)
 =========================================
-一键扫描"位宽-鲁棒景观(BRL)"的第一条曲线: 在给定骨干/数据集上, 对连续位宽谱
-做 PTQ(权重量化) 后评估 clean acc 与 PGD 鲁棒 acc。
+One-click scan of the first bitwidth-robustness landscape (BRL) curve: on a given backbone/dataset,
+apply PTQ (weight quantization) over a continuous bitwidth spectrum and evaluate clean and PGD-robust accuracy.
 
-用法(GPU):
+Usage (GPU):
     python brl_smoke.py --model resnet18 --dataset cifar10 \
         --bits 32 16 8 6 4 3 2 --pgd-iter 10 --eps 8 --out brl_smoke_out.json
 
-常用:
-    # 快速冒烟(验证管线, ~分钟级)
+Common:
+    # quick smoke test (pipeline check, ~minutes)
     python brl_smoke.py --model resnet18 --dataset cifar10 --limit 500 --pgd-iter 5 \
         --bits 32 8 4 2 --device cuda
-    # 完整扫描(景观)
+    # full scan (landscape)
     python brl_smoke.py --model resnet18 --dataset cifar10 --bits 32 16 8 6 4 3 2
 
-输出 JSON:
+Output JSON:
     {
       "meta": {...},
       "per_bitwidth": [
@@ -24,7 +24,7 @@
       "landscape_ready": true
     }
 
-依赖: brl_quant.py(同目录), torch, torchvision, numpy。
+Depends on: brl_quant.py (same directory), torch, torchvision, numpy.
 """
 from __future__ import annotations
 import argparse
@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from brl_quant import BITWIDTHS, ptq_quantize_weights, restore_weights, set_fp16
 
 
-# ---------------- 数据 ----------------
+# ---------------- data ----------------
 def load_cifar10(data_root: str, limit: int | None = None):
     tr = T.Compose([
         T.ToTensor(),
@@ -84,11 +84,11 @@ def build_model(name: str, num_classes: int, pretrained: bool = False) -> nn.Mod
     return m
 
 
-# ---------------- 攻击 ----------------
+# ---------------- attack ----------------
 def pgd_attack(model: nn.Module, x: torch.Tensor, y: torch.Tensor,
                eps: float, step: float, iters: int,
                norm: str = "linf") -> torch.Tensor:
-    """白盒 PGD。返回对抗样本(限 L_inf)。"""
+    """White-box PGD. Returns adversarial examples (L_inf bounded)."""
     delta = torch.zeros_like(x, requires_grad=True)
     for _ in range(iters):
         out = model(x + delta)
@@ -96,7 +96,7 @@ def pgd_attack(model: nn.Module, x: torch.Tensor, y: torch.Tensor,
         loss.backward()
         g = delta.grad.data
         delta.data = (delta.data + step * g.sign()).clamp(-eps, eps)
-        delta.data = (delta.data + x).clamp(0, 1) - x  # 保持有效像素域
+        delta.data = (delta.data + x).clamp(0, 1) - x  # keep within the valid pixel domain
         delta.grad.zero_()
     return x + delta
 
@@ -104,9 +104,9 @@ def pgd_attack(model: nn.Module, x: torch.Tensor, y: torch.Tensor,
 @torch.no_grad()
 def evaluate(model: nn.Module, loader, device, eps=8 / 255, pgd_iters=10,
              step_ratio=2 / 255 / (8 / 255)) -> tuple[float, float, int]:
-    """返回 (clean_acc%, robust_acc%, n_samples)。"""
+    """Return (clean_acc%, robust_acc%, n_samples)."""
     model.to(device).eval()
-    # 类型对齐: FP16 分支下权重为 half, 输入需 cast 到同 dtype
+    # type alignment: in the FP16 branch weights are half, inputs must be cast to the same dtype
     wdtype = next(model.parameters()).dtype
     correct_c = 0
     correct_r = 0
@@ -118,7 +118,7 @@ def evaluate(model: nn.Module, loader, device, eps=8 / 255, pgd_iters=10,
         # clean
         out = model(images)
         correct_c += (out.argmax(1) == labels).sum().item()
-        # adversarial (PGD 需开梯, 在 no_grad 外单独算)
+        # adversarial (PGD needs gradients; computed separately, outside no_grad)
         with torch.enable_grad():
             adv = pgd_attack(model, images, labels, eps=eps, step=eps * step_ratio,
                              iters=pgd_iters)
@@ -130,14 +130,14 @@ def evaluate(model: nn.Module, loader, device, eps=8 / 255, pgd_iters=10,
     return clean, robust, total
 
 
-# ---------------- 主流程 ----------------
+# ---------------- main ----------------
 def main():
-    ap = argparse.ArgumentParser(description="BRL 冒烟: 位宽-鲁棒景观第一曲线")
+    ap = argparse.ArgumentParser(description="BRL smoke: first bitwidth-robustness landscape curve")
     ap.add_argument("--model", default="resnet18")
     ap.add_argument("--dataset", default="cifar10", choices=["cifar10", "cifar100"])
     ap.add_argument("--data-root", default="./data")
     ap.add_argument("--bits", type=int, nargs="+", default=None)
-    ap.add_argument("--limit", type=int, default=None, help="测试样本数(冒烟用)")
+    ap.add_argument("--limit", type=int, default=None, help="number of test samples (smoke test)")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--eps", type=float, default=8 / 255)
     ap.add_argument("--pgd-iter", type=int, default=10)
@@ -163,7 +163,7 @@ def main():
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # FP32 参考模型(随机初始化; 冒烟只验证管线, 不追求精度)
+    # FP32 reference model (random init; the smoke test only validates the pipeline, not accuracy)
     model = build_model(args.model, n_cls, pretrained=False).to(device)
     print(f"[{args.model}@{args.dataset}] device={device} n_cls={n_cls} "
           f"n_test={len(ds)} bits={bits_list}", flush=True)

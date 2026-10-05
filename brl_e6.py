@@ -1,18 +1,18 @@
 """
-方向A · E6 鲁棒-位宽-能耗 Pareto 前沿 (brl_e6.py)
+E6 robustness-bitwidth-energy Pareto frontier (brl_e6.py)
 ==================================================
-RQ5: 在"鲁棒 / 位宽 / 能耗"三维权衡下, 给出一组非支配(Pareto)配置与部署选型表。
-集成已有实验数据:
-  - 均匀位宽谱 AT 鲁棒: 来自 E1/E3 (brl_at_pgd20.json / brl_e3_at.json)
-  - 混合精度配置:      来自 E5 (brl_e5.json 的 key_layers_int8 与 avg_bits)
-补充能耗维度:
+RQ5: under the robustness / bitwidth / energy trade-off, produce a set of non-dominated (Pareto) configurations and a deployment selection table.
+Integrates existing experimental data:
+  - uniform-bitwidth-spectrum AT robustness: from E1/E3 (brl_at_pgd20.json / brl_e3_at.json)
+  - mixed-precision config: from E5 (brl_e5.json key_layers_int8 and avg_bits)
+Adds the energy dimension:
   - Energy(BOPS) = 2 * Σ_layers [ MACs_l * (bits_w_l + bits_a_l) ]
-    对称部署假定 bits_a = bits_w; MACs 由 forward hook 抓输出 shape + 权重 shape 计算。
-输出:
-  - per_config: 每个配置的 bits / robust / energy(G-BOPS) / energy_vs_fp32(%)
-  - pareto_front: 非支配点(能耗升序, 鲁棒单调不降)
-  - deploy_table: 按能耗/鲁棒约束的推荐选型
-依赖: brl_quant.py(权重位宽), torch。纯前向算 MACs, 无训练/攻击, 秒级完成。
+    symmetric deployment assumes bits_a = bits_w; MACs are computed from forward hooks using output shape + weight shape.
+Output:
+  - per_config: per-config bits / robust / energy (G-BOPS) / energy_vs_fp32 (%)
+  - pareto_front: non-dominated points (ascending energy, robustness non-decreasing)
+  - deploy_table: recommended configs under energy/robustness constraints
+Depends on: brl_quant.py (weight bitwidth), torch. Forward-only MACs; no training/attack; completes in seconds.
 """
 from __future__ import annotations
 import argparse
@@ -32,7 +32,7 @@ MOD = (nn.Conv2d, nn.Conv1d, nn.Linear)
 
 
 def compute_macs(model: nn.Module, input_size=(1, 3, 32, 32)) -> dict:
-    """返回 {layer_name: MACs}。用 hook 抓各权重层输出 shape + 权重 shape 推算。"""
+    """Return a {layer_name: MACs} map. Uses hooks to capture each weight-layer output shape + weight shape."""
     shapes = {}
 
     def make_hook(name):
@@ -68,16 +68,16 @@ def compute_macs(model: nn.Module, input_size=(1, 3, 32, 32)) -> dict:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BRL E6 Pareto 前沿")
+    ap = argparse.ArgumentParser(description="BRL E6 Pareto frontier")
     ap.add_argument("--ckpt", default="ckpt/brl_rn18_at.pth")
     ap.add_argument("--e5", default="results/brl_e5.json",
-                    help="E5 结果(取混合精度关键层与 avg_bits)")
+                    help="E5 results (mixed-precision critical layers and avg_bits)")
     ap.add_argument("--out", default="brl_e6.json")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = build_model("resnet18", 10).to(device)
-    # 只需结构算 MACs, 权重内容不影响
+    # only structure is needed to compute MACs; weight content is irrelevant
     macs = compute_macs(model)
     named_w = [(n, m) for n, m in model.named_modules()
                if isinstance(m, MOD) and hasattr(m, "weight")]
@@ -85,14 +85,14 @@ def main():
     for n, _ in named_w[:6]:
         print(f"   {n}: MACs={macs[n]/1e6:.2f}M", flush=True)
 
-    # ---- 已有实验鲁棒(AT 骨干) ----
+    # ---- existing experimental robustness (AT backbone) ----
     uniform_rob = {
         32: 70.81, 8: 70.93, 6: 70.59, 4: 69.12,
         3: 58.04, 2: 6.59, 1: 8.27,
     }
     uniform_clean = {8: 85.43, 4: 84.69, 3: 78.63}
 
-    # E5 混合配置
+    # E5 mixed configuration
     e5 = json.load(open(args.e5))
     key_names = set(k["layer"] for k in e5["key_layers_int8"])
     mix_bits_map = {n: (8 if n in key_names else 3) for n, _ in named_w}
@@ -104,15 +104,15 @@ def main():
         e = 0.0
         for n, _ in named_w:
             bw = bits_map[n]
-            ba = bw  # 对称部署
+            ba = bw  # symmetric deployment
             e += macs[n] * (bw + ba)
-        return 2.0 * e  # 乘+加
+        return 2.0 * e  # multiply + add
 
     fp32_map = {n: 32 for n, _ in named_w}
     e_fp32 = config_energy(fp32_map)
 
     configs = []
-    # 均匀位宽谱
+    # uniform bitwidth spectrum
     for b in [32, 16, 8, 7, 6, 5, 4, 3, 2, 1]:
         if b not in uniform_rob:
             continue
@@ -126,7 +126,7 @@ def main():
             "energy_gbops": e / 1e9,
             "energy_vs_fp32": 100.0 * e / e_fp32,
         })
-    # 混合配置
+    # mixed configuration
     e_mix = config_energy(mix_bits_map)
     configs.append({
         "name": "mixed_robust(E5)",
@@ -136,8 +136,8 @@ def main():
         "energy_vs_fp32": 100.0 * e_mix / e_fp32,
     })
 
-    # ---- Pareto 前沿: 非支配点(能耗越低越好, 鲁棒越高越好) ----
-    # 按能耗升序; 保留"鲁棒不降"的递增序列(单调 Pareto)
+    # ---- Pareto front: non-dominated points (lower energy better, higher robustness better) ----
+    # sort by ascending energy; keep the non-decreasing robust sequence (monotone Pareto)
     configs.sort(key=lambda c: (c["energy_gbops"], -c["robust"]))
     front = []
     best_rob = -1

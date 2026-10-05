@@ -1,16 +1,16 @@
-# BRL 可复现环境依赖
-# 验证过的组合: PyTorch 2.1.0 + CUDA 11.8/12.1, Python 3.10
-# 论文原实验运行于单张 NVIDIA RTX 3090 (24GB)
+# BRL reproducible environment dependencies
+# Validated combination: PyTorch 2.1.0 + CUDA 11.8/12.1, Python 3.10
+# The paper experiments ran on a single NVIDIA RTX 3090 (24 GB)
 
 torch>=2.0.0
 torchvision>=0.15.0
 numpy>=1.24
 scipy>=1.10
-# AutoAttack (表 tab:aa 的强评估器)
+# AutoAttack (the strong evaluator for tab:aa)
 autoattack>=0.1
-# DeiT-Tiny / ViT 跨架构 (表 tab:e7c)
+# DeiT-Tiny / ViT cross-architecture (tab:e7c)
 timm
-# ONNX 延迟代理基准 (Sec. VI energy/latency)
+# ONNX latency proxy benchmark (Sec. VI energy/latency)
 onnxruntime>=1.16
-# pytest 可选单元自检
+# pytest optional unit self-test
 pytest>=7.0

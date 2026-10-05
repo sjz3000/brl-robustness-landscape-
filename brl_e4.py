@@ -1,18 +1,18 @@
 """
-方向A · E4 Robust-QAT 三范式对比 (brl_e4.py)
+E4 Robust-QAT three-paradigm comparison (brl_e4.py)
 ==============================================
-在低位宽(INT4/INT3/INT2)下对比三种"边缘友好鲁棒再训练(Robust-QAT)"范式，
-检验"如何在低位宽守住/提升对抗鲁棒性"（RQ3）。
+Compares three edge-friendly robust re-training (Robust-QAT) paradigms at low bitwidths (INT4/INT3/INT2),
+testing how to preserve/improve adversarial robustness at low bitwidths (RQ3).
 
-三种范式:
-  F1  AT -> PTQ            : 全精度AT骨干直接训练后量化(不重训)。基线，E1已有类似。
-  F2  PTQ -> retrain-AT    : 从全精度AT骨干初始化, 量化感知(STE w+a)+PGD-AT 微调30ep。
-  F3  Joint QAT + AT       : 随机初始化, 从头量化感知对抗训练 (~20ep 短版对照)。
+Three paradigms:
+  F1  AT -> PTQ            : direct PTQ of a full-precision AT backbone (no retraining). Baseline, similar to E1.
+  F2  PTQ -> retrain-AT    : initialize from a full-precision AT backbone, quantization-aware (STE w+a) + PGD-AT fine-tune 30 ep.
+  F3  Joint QAT + AT       : random init, quantization-aware adversarial training from scratch (~20 ep short comparison).
 
-权重QAT: 训练时用 forward-hook 注入 STE fake-quant(per-channel)。
-激活QAT: 替换 ReLU 注入 STE 激活量化。
-评估: 恢复 forward，再用 PTQ 就地量化权重后 clean + PGD-20。
-依赖: brl_quant.py, brl_train.py(同目录)。
+Weight QAT: inject STE fake-quant (per-channel) via a forward hook during training.
+Activation QAT: replace ReLU to inject STE activation quantization.
+Evaluation: restore forward, then evaluate clean + PGD-20 after in-place PTQ weight quantization.
+Depends on: brl_quant.py, brl_train.py (same directory).
 """
 from __future__ import annotations
 import argparse
@@ -47,7 +47,7 @@ def _q_conv(mm, x):
 
 
 def inject_weight_qat(model, bits):
-    """替换 conv/linear 前向为 STE 权重量化版。返回 restore 闭包。"""
+    """Replace conv/linear forward with an STE weight-quantized version. Returns a restore closure."""
     from types import MethodType
     saved = {}
     for m in model.modules():
@@ -68,7 +68,7 @@ def inject_weight_qat(model, bits):
 
 
 def inject_act_qat(model, bits):
-    """替换 ReLU 为 STE 激活量化版。返回 restore。"""
+    """Replace ReLU with an STE activation-quantized version. Returns a restore."""
     from types import MethodType
     saved = {}
     for m in model.modules():
@@ -89,7 +89,7 @@ def inject_act_qat(model, bits):
 
 
 def eval_quantized(model, device, test_loader, args, bits):
-    """就地量化权重评估 clean+PGD (恢复所有 hook 后做). 返回 (clean, robust)."""
+    """In-place weight-quantized clean+PGD evaluation (after restoring all hooks). Returns (clean, robust)."""
     model.eval()
     backup = BQ.make_weight_backup(model)
     BQ.ptq_quantize_weights(model, bits, scheme="sym", per_channel=True)
@@ -109,8 +109,8 @@ def eval_quantized(model, device, test_loader, args, bits):
 
 
 def run_qat_from(model, device, train_loader, args, epochs, bits, lr, seed, tag):
-    """以 model 为起点做量化感知对抗训练。返回 (final_model, restore_w, restore_a).
-    restore_w/a 是训练期间注入的 hook，须在评估前恢复。"""
+    """Run quantization-aware adversarial training starting from model. Returns (final_model, restore_w, restore_a).
+    restore_w/a are the hooks injected during training and must be restored before evaluation."""
     restore_w = inject_weight_qat(model, bits)
     restore_a = inject_act_qat(model, bits)
     model.train()
@@ -170,7 +170,7 @@ def main():
                "F1_at_ptq": {}, "F2_retrain_at": {}, "F3_joint": {}}
 
     # ---------- F1: AT -> PTQ ----------
-    log("=== F1: AT->PTQ (全精度AT骨干直接量化, 基线) ===")
+    log("=== F1: AT->PTQ (direct quantization of a full-precision AT backbone, baseline) ===")
     base = BT.build_resnet18(10).to(device)
     base.load_state_dict(torch.load(args.ckpt, map_location=device))
     for b in args.bits:
@@ -179,22 +179,22 @@ def main():
         results["F1_at_ptq"][str(b)] = {"clean": c, "robust": r}
     del base; torch.cuda.empty_cache()
 
-    # ---------- F2: PTQ -> retrain AT (QAT, 从AT骨干初始化) ----------
-    log("=== F2: QAT+retrain-AT (从AT骨干初始化, STE量化+PGD对抗微调) ===")
+    # ---------- F2: PTQ -> retrain AT (QAT, initialized from the AT backbone) ----------
+    log("=== F2: QAT+retrain-AT (init from AT backbone, STE quantization + PGD-AT fine-tune) ===")
     for b in args.bits:
         m = BT.build_resnet18(10).to(device)
         m.load_state_dict(torch.load(args.ckpt, map_location=device))
         m, rw, ra = run_qat_from(m, device, train_loader, args, args.epochs_f2, b,
                                  args.lr_f2, args.seed, "F2")
-        rw(); ra(); torch.cuda.empty_cache()  # 恢复 hook
+        rw(); ra(); torch.cuda.empty_cache()  # restore hooks
         c, r = eval_quantized(m, device, test_loader, args, b)
         log(f"  F2 bits={b}: clean={c:.2f}% robust={r:.2f}%")
         results["F2_retrain_at"][str(b)] = {"clean": c, "robust": r}
         torch.save(m.state_dict(), f"ckpt/brl_e4_F2_b{b}.pth")
         del m; torch.cuda.empty_cache()
 
-    # ---------- F3: Joint QAT + AT (从头) ----------
-    log("=== F3: Joint QAT+AT (随机初始化, 从头量化感知对抗) ===")
+    # ---------- F3: Joint QAT + AT (from scratch) ----------
+    log("=== F3: Joint QAT+AT (random init, quantization-aware adversarial training from scratch) ===")
     for b in args.bits:
         m = BT.build_resnet18(10).to(device)
         m, rw, ra = run_qat_from(m, device, train_loader, args, args.epochs_f3, b,

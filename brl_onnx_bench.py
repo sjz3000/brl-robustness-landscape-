@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""BRL ONNX 真实推理延迟基准 (P0-3, 边缘部署硬件验证的前置演示)
-对比 FP32 vs dynamic-INT8 在 onnxruntime CPU 上的单样本推理延迟。
-诚实报告 ResNet-18 (卷积为主) 在通用 CPU 动态量化下的加速情况。
+"""BRL ONNX real-inference latency benchmark
+Compares single-sample inference latency of FP32 vs dynamic-INT8 on onnxruntime CPU.
+Honestly reports the speedup of ResNet-18 (conv-dominated) under dynamic quantization on a general CPU.
 """
 import time, numpy as np, torch, torchvision
 import onnxruntime as ort
@@ -18,7 +18,7 @@ x = torch.randn(1, 3, 32, 32)
 torch.onnx.export(m, x, "/tmp/rn18_fp32.onnx",
                   input_names=["input"], output_names=["logits"], opset_version=12)
 
-# dynamic INT8 (QUInt8) - 量化 Linear/MatMul/Gemm 权重
+# dynamic INT8 (QUInt8) - quantize Linear/MatMul/Gemm weights
 quant.quantize_dynamic("/tmp/rn18_fp32.onnx", "/tmp/rn18_int8_qu8.onnx",
                        weight_type=quant.QuantType.QUInt8)
 
@@ -37,4 +37,4 @@ fp32 = bench("/tmp/rn18_fp32.onnx", label="fp32")
 int8 = bench("/tmp/rn18_int8_qu8.onnx", label="int8")
 print(f"FP32: {fp32:.4f} ms/iter")
 print(f"INT8(dynamic,QU8): {int8:.4f} ms/iter")
-print(f"speedup: {fp32/int8:.2f}x  (conv-heavy ResNet-18: dynamic-INT8 主要加速 FC/MatMul，Conv 未加速)")
+print(f"speedup: {fp32/int8:.2f}x  (conv-heavy ResNet-18: dynamic-INT8 mainly accelerates FC/MatMul, Conv is not accelerated)")

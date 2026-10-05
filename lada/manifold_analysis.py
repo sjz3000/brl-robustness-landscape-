@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-manifold_analysis.py - 流形几何分析脚本
-输入：特征numpy文件(.npy)
-输出：流形几何指标（本征维度、曲率谱、各向异性指数、邻域图拓扑）
+manifold_analysis.py - manifold geometry analysis script
+Input: feature numpy files (.npy)
+Output: manifold geometry metrics (intrinsic dimension, curvature spectrum, anisotropy index, neighborhood-graph topology)
 
-用法: python3 manifold_analysis.py --features_dir /path/to/features --output_dir ./results
+Usage: python3 manifold_analysis.py --features_dir /path/to/features --output_dir ./results
 """
 import os, sys, json, numpy as np, argparse, warnings
 from tqdm import tqdm
 warnings.filterwarnings('ignore')
 
-# 尝试导入skdim
+# try to import skdim
 try:
     from skdim.id import TwoNN
     SKDIM_AVAILABLE = True
@@ -20,7 +20,7 @@ except ImportError:
 
 
 def estimate_intrinsic_dim(features, method='two_nn'):
-    """估计本征维度（Intrinsic Dimension）"""
+    """Estimate the intrinsic dimension"""
     # subsample for speed (max 5000 points)
     n = min(5000, len(features))
     idx = np.random.RandomState(42).choice(len(features), n, replace=False)
@@ -31,14 +31,14 @@ def estimate_intrinsic_dim(features, method='two_nn'):
         id_ = two_nn.fit_transform(subset)
         return float(id_)
     else:
-        # PCA比值法（简化的MLE-like估计）
+        # PCA ratio method (a simplified MLE-like estimate)
         from sklearn.decomposition import PCA
         pca = PCA()
         pca.fit(subset)
-        # 找到解释95%方差的主成分数
+        # find the number of principal components explaining 95% of variance
         cumsum = np.cumsum(pca.explained_variance_ratio_)
         id_pca = int(np.searchsorted(cumsum, 0.95) + 1)
-        # 最大曲率点（elbow method）
+        # maximum-curvature point (elbow method)
         diffs = np.diff(pca.explained_variance_ratio_)
         id_elbow = int(np.argmax(np.abs(np.diff(diffs))) + 1) if len(diffs) > 1 else id_pca
         return {
@@ -48,7 +48,7 @@ def estimate_intrinsic_dim(features, method='two_nn'):
 
 
 def compute_curvature_spectrum(features, n_neighbors=15, n_samples=3000):
-    """估计局部主曲率谱（通过邻域PCA）"""
+    """Estimate the local principal-curvature spectrum (via neighborhood PCA)"""
     n = min(n_samples, len(features))
     idx = np.random.RandomState(42).choice(len(features), n, replace=False)
     subset = features[idx]
@@ -64,14 +64,14 @@ def compute_curvature_spectrum(features, n_neighbors=15, n_samples=3000):
     explained_var = []
     
     for i in range(n):
-        neighbors = subset[indices[i][1:]]  # 不包括自身
+        neighbors = subset[indices[i][1:]]  # exclude itself
         centered = neighbors - neighbors.mean(axis=0, keepdims=True)
         _, s, _ = np.linalg.svd(centered, full_matrices=False)
         
-        # 曲率 ≈ 第一奇异值与迹的比值
+        # curvature ~= ratio of the first singular value to the trace
         local_var = s.sum()
         if local_var > 1e-10:
-            # 谱分析
+            # spectral analysis
             var_ratio = s ** 2 / (s ** 2).sum()
             curv = s[0] / local_var if local_var > 0 else 0
             curvatures.append(curv)
@@ -88,10 +88,10 @@ def compute_curvature_spectrum(features, n_neighbors=15, n_samples=3000):
 
 
 def compute_anisotropy(features):
-    """计算各向异性指数"""
+    """Compute the anisotropy index"""
     from sklearn.decomposition import PCA
     
-    # 完整特征协方差的特征值谱
+    # eigenvalue spectrum of the full feature covariance
     pca = PCA()
     pca.fit(features)
     eigvals = pca.explained_variance_
@@ -100,19 +100,19 @@ def compute_anisotropy(features):
     if len(eigvals) < 5:
         return {'anisotropy': 1.0, 'eig_slope': 0}
     
-    # 幂律拟合: log(eigvals) = slope * log(rank) + intercept
+    # power-law fit: log(eigvals) = slope * log(rank) + intercept
     ranks = np.arange(1, len(eigvals) + 1)
     log_ranks = np.log10(ranks)
     log_eigs = np.log10(eigvals)
     
-    # 只用前50%的特征值做拟合（避免尾部噪声）
+    # fit using only the top 50% of eigenvalues (to avoid tail noise)
     half = len(log_eigs) // 2
     slope, intercept = np.polyfit(log_ranks[:half], log_eigs[:half], 1)
     
-    # 各向异性指数 = -slope（越陡峭越各向异性）
+    # anisotropy index = -slope (steeper = more anisotropic)
     anisotropy = -slope
     
-    # 特征值均匀性（归一化熵）
+    # eigenvalue uniformity (normalized entropy)
     eig_norm = eigvals / eigvals.sum()
     entropy = -np.sum(eig_norm * np.log(eig_norm + 1e-10))
     max_entropy = np.log(len(eig_norm))
@@ -128,7 +128,7 @@ def compute_anisotropy(features):
 
 
 def compute_knn_graph(features, k=10, n_samples=5000):
-    """kNN邻域图分析"""
+    """kNN neighborhood-graph analysis"""
     n = min(n_samples, len(features))
     idx = np.random.RandomState(42).choice(len(features), n, replace=False)
     subset = features[idx]
@@ -139,14 +139,14 @@ def compute_knn_graph(features, k=10, n_samples=5000):
     nn.fit(subset)
     distances, indices = nn.kneighbors(subset)
     
-    # 平均邻域距离
-    mean_dist = np.mean(distances[:, 1:])  # 不包括自身
+    # mean neighborhood distance
+    mean_dist = np.mean(distances[:, 1:])  # exclude itself
     
-    # 邻域密度估计（第k近邻距离）
+    # neighborhood-density estimate (k-th nearest-neighbor distance)
     kth_dist = distances[:, -1]
     density = 1.0 / (kth_dist + 1e-10)
     
-    # 局部邻域各向异性（第k近邻距离的变异系数）
+    # local neighborhood anisotropy (coefficient of variation of k-NN distances)
     cv = np.std(kth_dist) / (np.mean(kth_dist) + 1e-10)
     
     return {
@@ -159,9 +159,9 @@ def compute_knn_graph(features, k=10, n_samples=5000):
 
 
 def analyze_features(features_path, output_dir):
-    """分析单个特征文件"""
+    """Analyze a single feature file"""
     base = os.path.splitext(os.path.basename(features_path))[0]
-    # 去掉_features后缀
+    # strip the _features suffix
     ckpt_name = base.replace('_features', '')
     
     out_file = os.path.join(output_dir, f"{ckpt_name}_geometry.json")
@@ -169,46 +169,46 @@ def analyze_features(features_path, output_dir):
         with open(out_file) as f:
             return json.load(f)
     
-    print(f"\n📊 分析: {ckpt_name}")
+    print(f"\nAnalyzing: {ckpt_name}")
     
-    # 加载特征
+    # load features
     features = np.load(features_path)
-    print(f"  特征形状: {features.shape}")
+    print(f"  feature shape: {features.shape}")
     
     if len(features) > 50000:
-        # 随机采样50,000点
+        # randomly sample 50,000 points
         idx = np.random.RandomState(42).choice(len(features), 50000, replace=False)
         features = features[idx]
-        print(f"  采样至: {features.shape}")
+        print(f"  sampled to: {features.shape}")
     
     result = {'num_samples': len(features), 'feat_dim': features.shape[1]}
     
-    # 1. 本征维度
-    print("  [1/4] 本征维度估算...")
+    # 1. intrinsic dimension
+    print("  [1/4] estimating intrinsic dimension...")
     result['intrinsic_dim'] = estimate_intrinsic_dim(features)
     
-    # 2. 曲率谱
-    print("  [2/4] 曲率谱分析...")
+    # 2. curvature spectrum
+    print("  [2/4] curvature-spectrum analysis...")
     result['curvature'] = compute_curvature_spectrum(features)
     
-    # 3. 各向异性
-    print("  [3/4] 各向异性分析...")
+    # 3. anisotropy
+    print("  [3/4] anisotropy analysis...")
     result['anisotropy'] = compute_anisotropy(features)
     
-    # 4. kNN邻域图
-    print("  [4/4] 邻域图分析...")
+    # 4. kNN neighborhood graph
+    print("  [4/4] neighborhood-graph analysis...")
     result['knn_graph'] = compute_knn_graph(features)
     
-    # 保存
+    # save
     with open(out_file, 'w') as f:
         json.dump(result, f, indent=2, default=str)
     
-    print(f"  结果保存至: {out_file}")
+    print(f"  results saved to: {out_file}")
     return result
 
 
 def summarize_results(output_dir):
-    """汇总所有分析结果为表格（用于生成Table 1）"""
+    """Aggregate all analysis results into a table (for Table 1)"""
     results = []
     for f in sorted(os.listdir(output_dir)):
         if f.endswith('_geometry.json'):
@@ -243,7 +243,7 @@ def summarize_results(output_dir):
             
             results.append(row)
     
-    # 打印表格
+    # print table
     if results:
         print("\n" + "=" * 120)
         header = ['Checkpoint', 'ID', 'Curvature', 'Anisotropy', 'Uniformity', 'kNN dist']
@@ -253,11 +253,11 @@ def summarize_results(output_dir):
             id_str = str(r.get('id', r.get('id_pca_95', '')))
             print(f"{r['checkpoint']:<35} {id_str:<8} {r['mean_curvature']:<12} {r['anisotropy']:<12} {r['uniformity']:<12} {r['mean_knn_dist']:<10}")
     
-    # 保存汇总
+    # save summary
     summary_path = os.path.join(output_dir, "manifold_summary.json")
     with open(summary_path, 'w') as f:
         json.dump(results, f, indent=2)
-    print(f"\n汇总结果保存至: {summary_path}")
+    print(f"\nSummary saved to: {summary_path}")
     
     return results
 
@@ -265,13 +265,13 @@ def summarize_results(output_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--features_dir', type=str, default='./features',
-                        help='特征文件目录')
+                        help='feature-file directory')
     parser.add_argument('--output_dir', type=str, default='./features/analysis',
-                        help='分析结果输出目录')
-    parser.add_argument('--all', action='store_true', help='分析所有特征文件')
+                        help='analysis output directory')
+    parser.add_argument('--all', action='store_true', help='analyze all feature files')
     parser.add_argument('--features', type=str, nargs='+', default=None,
-                        help='具体特征文件')
-    parser.add_argument('--summarize', action='store_true', help='汇总已有结果')
+                        help='a specific feature file')
+    parser.add_argument('--summarize', action='store_true', help='summarize existing results')
     args = parser.parse_args()
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -280,7 +280,7 @@ def main():
         summarize_results(args.output_dir)
         return
     
-    # 确定要分析的文件
+    # determine the files to analyze
     if args.all:
         feature_files = sorted([
             os.path.join(args.features_dir, f)
@@ -290,26 +290,26 @@ def main():
     elif args.features:
         feature_files = [os.path.join(args.features_dir, f) for f in args.features]
     else:
-        # 默认分析所有
+        # analyze all by default
         feature_files = sorted([
             os.path.join(args.features_dir, f)
             for f in os.listdir(args.features_dir)
             if f.endswith('_features.npy')
         ])
     
-    print(f"找到 {len(feature_files)} 个特征文件")
+    print(f"Found {len(feature_files)} feature files")
     
     for fpath in feature_files:
         try:
             analyze_features(fpath, args.output_dir)
         except Exception as e:
-            print(f"  ❌ 分析失败 {fpath}: {e}")
+            print(f"  analysis failed {fpath}: {e}")
     
-    # 汇总
+    # summary
     print("\n" + "=" * 60)
-    print("  生成汇总表...")
+    print("  generating summary table...")
     summarize_results(args.output_dir)
-    print(f"\n完成！结果在: {args.output_dir}")
+    print(f"\nDone! Results in: {args.output_dir}")
 
 
 if __name__ == '__main__':

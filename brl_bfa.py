@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""BRL bit-flip 故障攻击评估 (TDSC 安全定位补强)
-对 PTQ 量化后的各 bitwidth 权重注入随机 bit-flip (Row-Hammer 类位翻转),
-测量 clean acc 与 PGD 鲁棒的退化, 研究不同位宽下权重的故障敏感性。
+"""BRL bit-flip fault-attack evaluation
+Injects random bit flips (Row-Hammer-like) into PTQ-quantized weights at each bitwidth,
+and measures the degradation of clean accuracy and PGD robustness to study weight fault sensitivity across bitwidths.
 
-用法:
+Usage:
   python3 brl_bfa.py --ckpt ckpt/brl_rn18_at.pth --out results/bfa_at.json
 """
 import argparse, json, random, torch, torchvision
@@ -50,7 +50,7 @@ def pgd_robust(m, loader, eps=0.03125, iters=8, alpha=0.004, device="cuda"):
     return corr/tot*100
 
 def q_int(w, bits):
-    """per-channel 对称量化 -> (int_repr, scale). w:(C,...) scale:(C,)"""
+    """per-channel symmetric quantization -> (int_repr, scale). w:(C,...) scale:(C,)"""
     shape=w.shape; wf=w.reshape(shape[0],-1)
     scale=wf.abs().max(dim=1,keepdim=True).values
     q=torch.clamp(torch.round(wf/scale* (2**(bits-1)-1)),

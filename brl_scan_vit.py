@@ -1,18 +1,18 @@
 """
-方向A · E1 BRL 主景观扫描 (brl_scan.py)
+E1 BRL main landscape scan for DeiT (brl_scan_vit.py)
 ========================================
-加载训练好的骨干 ckpt, 对连续位宽谱做 PTQ(权重量化) 后评估 clean acc 与 PGD 鲁棒 acc,
-产出"位宽-鲁棒景观"曲线。这是 E1 的核心科学产出。
+Loads a trained backbone ckpt, applies PTQ (weight quantization) over a continuous bitwidth spectrum and evaluates clean accuracy and PGD-robust accuracy
+to produce the bitwidth-robustness landscape curve. This is the core scientific output of E1.
 
-用法:
-    # 扫描 CE 骨干 (标准训练模型)
+Usage:
+    # scan CE backbone (standard-trained model)
     python brl_scan.py --ckpt ckpt/brl_rn18_ce.pth --model resnet18 --dataset cifar10 \
         --bits 32 16 8 6 4 3 2 --pgd-iter 10 --eps 0.03125 --out brl_ce_pgd10.json
-    # 扫描 AT 骨干 (对抗训练模型)
+    # scan AT backbone (adversarially-trained model)
     python brl_scan.py --ckpt ckpt/brl_rn18_at.pth --model resnet18 --dataset cifar10 \
         --bits 32 16 8 6 4 3 2 --pgd-iter 10 --eps 0.03125 --out brl_at_pgd10.json
 
-依赖: brl_quant.py(同目录), torch, torchvision。
+Depends on: brl_quant.py (same directory), torch, torchvision.
 """
 from __future__ import annotations
 import argparse
@@ -45,7 +45,7 @@ def load_cifar10(data_root: str, limit: int | None = None):
 
 
 def load_cifar100(data_root: str, limit: int | None = None):
-    """E7b 跨数据集: CIFAR-100 测试集(与 CIFAR-10 相同归一化)。"""
+    """E7b cross-dataset: CIFAR-100 test set (same normalization as CIFAR-10)."""
     tr = T.Compose([
         T.ToTensor(),
         T.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
@@ -77,8 +77,8 @@ def build_model(name: str, num_classes: int) -> nn.Module:
 
 
 def _norm_pixel_bounds(device, dtype=torch.float32):
-    # dtype 跟随输入 x: 避免 fp16 输入时被 fp32 边界 clamp 引发的类型提升,
-    # 否则 delta 变 fp32 导致后续 forward 输入/权重 dtype 不匹配崩溃
+    # dtype follows input x: avoid type promotion when an fp16 input is clamped to fp32 bounds,
+    # otherwise delta becomes fp32, causing a forward input/weight dtype mismatch crash
     mean = torch.tensor([0.4914, 0.4822, 0.4465], device=device, dtype=dtype).view(3, 1, 1)
     std = torch.tensor([0.2023, 0.1994, 0.2010], device=device, dtype=dtype).view(3, 1, 1)
     return (-mean / std, (1 - mean) / std)
@@ -122,8 +122,8 @@ def evaluate(model: nn.Module, loader, device, eps=8 / 255, pgd_iters=10,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BRL E1 主景观扫描")
-    ap.add_argument("--ckpt", required=True, help="训练好的骨干权重 .pth")
+    ap = argparse.ArgumentParser(description="BRL E1 main landscape scan")
+    ap.add_argument("--ckpt", required=True, help="trained backbone weights .pth")
     ap.add_argument("--model", default="resnet18")
     ap.add_argument("--dataset", default="cifar10", choices=["cifar10", "cifar100"])
     ap.add_argument("--data-root", default="./data")
@@ -155,7 +155,7 @@ def main():
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # 加载训练好的骨干
+    # Load the trained backbone
     model = build_model(args.model, n_cls).to(device)
     sd = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(sd)

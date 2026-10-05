@@ -1,21 +1,21 @@
 """
-方向A · E1 骨干训练 (brl_train.py)
+E1 backbone training for DeiT (brl_train_vit.py)
 ==================================
-在边缘视觉骨干(这里 ResNet-18)上训练 CIFAR-10 基线模型, 供 BRLL(位宽-鲁棒景观)主扫描使用。
+Trains CIFAR-10 baseline models on an edge-vision backbone (here DeiT-Tiny / ResNet-18) to feed the BRL main scan.
 
-两种训练模式:
-  --mode ce   : 标准交叉熵训练 (clean 高, 鲁棒弱)   -> 对应【部署最常见模型】
-  --mode at   : PGD-AT 对抗训练 (鲁棒高, clean 略降)  -> 对应【安全敏感模型】
+Two training modes:
+  --mode ce   : standard cross-entropy training (high clean, weak robustness)  -> most-deployed model
+  --mode at   : PGD adversarial training (high robustness, slightly lower clean) -> safety-sensitive model
 
-复用标准超参(固定 seed, 逐配置独立可复现)。
+Uses standard hyperparameters (fixed seed, per-config reproducible).
 
-用法:
-    # CE 骨干 (约 95% clean)
+Usage:
+    # CE backbone (~95% clean)
     python brl_train.py --mode ce  --epochs 200 --batch-size 128 --out ckpt/brl_rn18_ce.pth --log brl_train_ce.log
-    # AT 骨干 (PGD-AT, eps=8/255, 10 iter; 约 83% clean / 45% robust)
+    # AT backbone (PGD-AT, eps=8/255, 10 iter; ~83% clean / 45% robust)
     python brl_train.py --mode at  --epochs 80  --batch-size 128 --out ckpt/brl_rn18_at.pth --log brl_train_at.log
 
-依赖: torch, torchvision。
+Depends on: torch, torchvision.
 """
 from __future__ import annotations
 import argparse
@@ -39,7 +39,7 @@ def set_seed(seed: int):
 
 def get_loaders(data_root: str, batch_size: int, num_workers: int = 4,
                dataset: str = "cifar10"):
-    """支持 CIFAR-10 / CIFAR-100(相同归一化)。"""
+    """Support CIFAR-10 / CIFAR-100 (identical normalization)."""
     ds_cls = (torchvision.datasets.CIFAR100 if dataset == "cifar100"
               else torchvision.datasets.CIFAR10)
     tr = T.Compose([
@@ -64,7 +64,7 @@ def get_loaders(data_root: str, batch_size: int, num_workers: int = 4,
 
 
 def build_model(name: str, num_classes: int = 10) -> nn.Module:
-    """支持 E7 跨架构: ResNet-18 / MobileNetV2 / DeiT-Tiny(attention)。"""
+    """Support E7 cross-architecture: ResNet-18 / MobileNetV2 / DeiT-Tiny (attention)."""
     if name == "resnet18":
         return torchvision.models.resnet18(num_classes=num_classes)
     if name == "mobilenetv2":
@@ -81,7 +81,7 @@ def build_resnet18(num_classes: int = 10) -> nn.Module:
 
 
 def _norm_pixel_bounds(device):
-    """CIFAR-10 归一化后像素的有效范围 per-channel (C,1,1), 用于 PGD 投影到有效像素域。"""
+    """Effective per-channel pixel bounds after CIFAR-10 normalization (C,1,1), used to project PGD perturbations onto the valid pixel domain."""
     mean = torch.tensor([0.4914, 0.4822, 0.4465], device=device).view(3, 1, 1)
     std = torch.tensor([0.2023, 0.1994, 0.2010], device=device).view(3, 1, 1)
     return (-mean / std, (1 - mean) / std)
@@ -125,12 +125,12 @@ def evaluate(model: nn.Module, loader, device, eps=8 / 255, pgd_iters=10,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BRL E1 骨干训练")
+    ap = argparse.ArgumentParser(description="BRL E1 backbone training")
     ap.add_argument("--mode", choices=["ce", "at"], default="ce")
     ap.add_argument("--model", default="resnet18",
-                    help="resnet18 | mobilenetv2 (E7 跨架构)")
+                    help="resnet18 | mobilenetv2 | deit_tiny (E7 cross-architecture)")
     ap.add_argument("--dataset", default="cifar10", choices=["cifar10", "cifar100"],
-                    help="cifar10 | cifar100 (E7b 跨数据集)")
+                    help="cifar10 | cifar100 (E7b cross-dataset)")
     ap.add_argument("--data-root", default="./data")
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=128)

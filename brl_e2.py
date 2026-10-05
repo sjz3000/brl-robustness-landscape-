@@ -1,35 +1,36 @@
 """
-方向A · E2 机制归因 (brl_e2.py)
-================================
-在训练好的骨干上做"鲁棒损失归因", 回答 RQ2: 位宽量化对鲁棒的破坏是
-①权重量化主导 还是 ②激活量化主导? 舍入方式(确定性 vs 随机噪声)影响如何?
+E2 mechanism attribution (brl_e2.py)
+=====================================
+On top of a trained backbone, perform "robustness-loss attribution" to answer RQ2: is the
+robustness damage from quantization driven mainly by (1) weight quantization or (2) activation
+quantization? How do rounding schemes (deterministic vs. stochastic noise) matter?
 
-依赖 E1 训练好的 ckpt (brl_rn18_ce.pth / brl_rn18_at.pth)。
+Requires E1-trained checkpoints (brl_rn18_ce.pth / brl_rn18_at.pth).
 
-三种归因维度:
-  1. 权重量化 (w-only): 仅量化 conv/linear 权重, 激活全精度
-  2. 激活量化 (a-only): 仅量化激活(ReLU输出), 权重全精度
-  3. 舍入方式 (rounding): 直接取整(round) vs 随机舍入(stochastic) vs STE直通
-     —— 分离"确定性精度削减"与"随机噪声"效应
+Three attribution dimensions:
+  1. Weight quantization (w-only): only quantize conv/linear weights, activations full-precision
+  2. Activation quantization (a-only): only quantize activations (ReLU output), weights full-precision
+  3. Rounding scheme (rounding): round-to-nearest vs. stochastic rounding vs. STE pass-through
+     -- separates "deterministic precision reduction" from "stochastic noise" effects
 
-用法:
-    # 在 GPU 上, E1 ckpt 就绪后:
+Usage:
+    # On GPU, once E1 ckpts are ready:
     python brl_e2.py --ckpt ckpt/brl_rn18_ce.pth --bits 32 16 8 6 4 3 2 \
         --pgd-iter 10 --eps 0.03125 --out brl_e2_ce.json
     python brl_e2.py --ckpt ckpt/brl_rn18_at.pth --bits 32 16 8 6 4 3 2 \
         --pgd-iter 10 --eps 0.03125 --out brl_e2_at.json
 
-输出 JSON 结构:
+Output JSON structure:
   {
     "meta": {...},
-    "w_only":   [{"bits":8,"clean":..,"robust":..}, ...],   # 只量化权重
-    "a_only":   [{"bits":8,"clean":..,"robust":..}, ...],   # 只量化激活
-    "w_and_a":  [{"bits":8,"clean":..,"robust":..}, ...],   # 两者都量化
+    "w_only":   [{"bits":8,"clean":..,"robust":..}, ...],   # only weights quantized
+    "a_only":   [{"bits":8,"clean":..,"robust":..}, ...],   # only activations quantized
+    "w_and_a":  [{"bits":8,"clean":..,"robust":..}, ...],   # both quantized
     "rounding": {"8": {"round":..,"stochastic":..,"ste":..},
-                 "4": {...}, "2": {...}}                    # 舍入方式对比(权重量化下)
+                 "4": {...}, "2": {...}}                    # rounding comparison (under weight quantization)
   }
 
-依赖: brl_quant.py(同目录), brl_scan.py(复用加载/评估), torch, torchvision。
+Depends on: brl_quant.py (same dir), brl_scan.py (reused for load/eval), torch, torchvision.
 """
 from __future__ import annotations
 import argparse
@@ -49,11 +50,11 @@ import brl_quant as BQ
 from brl_scan import build_model, evaluate, load_cifar10
 
 
-# ---------------- 随机舍入 / STE 权重量化(用于舍入归因) ----------------
+# ---------------- stochastic rounding / STE weight quantization (for rounding attribution) ----------------
 def ptq_weight_stochastic(
     model: nn.Module, bits: int, scheme: str = "sym", per_channel: bool = True
 ):
-    """随机舍入: q = floor(x/scale) + Bernoulli(frac). 破坏是随机噪声而非确定性取整。"""
+    """Stochastic rounding: q = floor(x/scale) + Bernoulli(frac). The noise is random, not deterministic rounding."""
     backup = BQ.make_weight_backup(model)
     for m, w in backup.items():
         if bits >= 32:
@@ -79,9 +80,11 @@ def ptq_weight_stochastic(
 def ptq_weight_ste(
     model: nn.Module, bits: int, scheme: str = "sym", per_channel: bool = True
 ):
-    """STE 舍入: 整数部分直接保留, 小数部分用 STE 直通(前向=量化, 但数值上取整+直通差分≈0)。
-    这里评估模式只取前向量化部分, 即 round-to-nearest(确定性) —— 与 round 相同。
-    为区分, 此函数用 truncation(向零截断) 以对比"不同确定性映射"。"""
+    """STE rounding: keep the integer part directly and use STE pass-through on the fractional part
+    (forward = quantized, but numerically rounding + pass-through gives a ~0 difference). In
+    evaluation mode, only the forward quantized part is used, i.e. round-to-nearest
+    (deterministic) — the same as round. To differentiate, this function uses truncation
+    (toward zero) to compare "different deterministic mappings"."""
     backup = BQ.make_weight_backup(model)
     for m, w in backup.items():
         if bits >= 32 or bits == 16:
@@ -91,14 +94,14 @@ def ptq_weight_ste(
         xr = w.reshape(w.shape[0], -1)
         amax = xr.abs().amax(dim=1, keepdim=True).clamp_min(1e-8)
         scale = amax / qmax
-        q = torch.trunc(xr / scale).clamp(-qmax, qmax)  # 向零截断(STE常用)
+        q = torch.trunc(xr / scale).clamp(-qmax, qmax)  # truncation toward zero (common in STE)
         dq = q * scale
         m.weight.data = dq.reshape(w.shape)
     return model
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BRL E2 机制归因")
+    ap = argparse.ArgumentParser(description="BRL E2 mechanism attribution")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--model", default="resnet18")
     ap.add_argument("--dataset", default="cifar10")
@@ -129,7 +132,7 @@ def main():
     base.eval()
     print(f"[E2] ckpt={args.ckpt} device={device} bits={bits_list}", flush=True)
 
-    # 全精度参考
+    # full-precision reference
     clean_fp, robust_fp, _ = evaluate(
         copy.deepcopy(base), loader, device, eps=args.eps, pgd_iters=args.pgd_iter)
     print(f"  FP32: clean={clean_fp:.2f}% robust={robust_fp:.2f}%", flush=True)
@@ -138,7 +141,7 @@ def main():
     w_only, a_only, w_and_a = [], [], []
 
     for bits in bits_list:
-        # 1) 权重仅量化
+        # 1) weights only quantized
         m = copy.deepcopy(base)
         if bits == 16:
             m = BQ.set_fp16(m)
@@ -149,7 +152,7 @@ def main():
         w_only.append({"bits": bits, "clean": round(c, 3), "robust": round(r, 3)})
         print(f"  [w-only]  bits={bits:>3} clean={c:6.2f}% robust={r:6.2f}%", flush=True)
 
-        # 2) 激活仅量化
+        # 2) activations only quantized
         m = copy.deepcopy(base)
         restore = BQ.quantize_activation_inplace(m, bits, scheme=args.scheme,
                                                  per_channel=False, modules=(nn.ReLU,))
@@ -158,7 +161,7 @@ def main():
         a_only.append({"bits": bits, "clean": round(c, 3), "robust": round(r, 3)})
         print(f"  [a-only]  bits={bits:>3} clean={c:6.2f}% robust={r:6.2f}%", flush=True)
 
-        # 3) 权重+激活都量化
+        # 3) weights and activations both quantized
         m = copy.deepcopy(base)
         m, _ = BQ.ptq_quantize_weights(m, bits, scheme=args.scheme,
                                        per_channel=True, inplace=True)
@@ -168,7 +171,7 @@ def main():
         w_and_a.append({"bits": bits, "clean": round(c, 3), "robust": round(r, 3)})
         print(f"  [w&a]    bits={bits:>3} clean={c:6.2f}% robust={r:6.2f}%", flush=True)
 
-    # 4) 舍入方式对比(仅权重量化, 关键位宽)
+    # 4) rounding comparison (weights only, key bitwidths)
     rounding = {}
     for bits in args.round_bits:
         if bits >= 16:

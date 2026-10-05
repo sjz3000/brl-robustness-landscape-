@@ -1,21 +1,22 @@
 """
-方向A · E3 几何机制 (brl_e3.py)
-================================
-在训练好的骨干上, 对连续位宽谱的量化模型追踪特征空间几何指标(ID/曲率)随位宽的变化,
-检验"位宽压缩 → 特征几何改变(ID↓/曲率变) → 鲁棒损失"的传递链。
+E3 geometric mechanism (brl_e3.py)
+===================================
+On a trained backbone, track how feature-space geometric metrics (ID/curvature) of the
+quantized model change with bitwidth, testing the chain
+"bitwidth compression -> feature geometric change (ID down / curvature change) -> robustness loss".
 
-复用 lada.manifold_analysis (estimate_intrinsic_dim + compute_curvature_spectrum)。
+Uses lada.manifold_analysis (estimate_intrinsic_dim + compute_curvature_spectrum).
 
-核心产出 per bitwidth:
-  - clean / robust (与 E1 景观对齐)
-  - id     (本征维度 TwoNN)
-  - curv   (主曲率 mean_curvature)
-  - 三者 vs bitwidth 的联合表, 用于 E3 判据:
-    "量化是否通过压缩特征几何传导到鲁棒损失"
+Core per-bitwidth outputs:
+  - clean / robust (aligned with the E1 landscape)
+  - id     (intrinsic dimension, TwoNN)
+  - curv   (principal curvature, mean_curvature)
+  - a joint table of all three vs. bitwidth, for the E3 criterion:
+    "does quantization propagate to robustness loss through feature-geometry compression?"
 
-依赖: brl_quant.py(同目录), lada(同目录), torch, torchvision。
+Depends on: brl_quant.py (same dir), lada (same dir), torch, torchvision.
 
-用法(GPU, E1/E2 ckpt 就绪后):
+Usage (GPU, once E1/E2 ckpts are ready):
     python brl_e3.py --ckpt ckpt/brl_rn18_ce.pth --bits 32 16 8 6 4 3 2 1 \
         --pgd-iter 20 --eps 0.03125 --feat-layer layer4 --out brl_e3_ce.json
     python brl_e3.py --ckpt ckpt/brl_rn18_at.pth --bits 32 16 8 6 4 3 2 1 \
@@ -38,14 +39,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import brl_quant as BQ
 from brl_scan import build_model, load_cifar10
 
-# lada 几何管线 (随包提供, 同目录)
+# lada geometry pipeline (bundled, same directory)
 from lada.manifold_analysis import estimate_intrinsic_dim, compute_curvature_spectrum
 
 
 def _norm_pixel_bounds(device, dtype=torch.float32):
-    # 修复 clamp bug: CIFAR 归一化后像素范围非 [0,1], 旧版 clamp(0,1) 会把
-    # 扰动投影放大 70-77 倍 → 虚高 robust/崩 clean。改用归一化像素边界。
-    # dtype 跟随输入 x: 避免 fp16 输入时被 fp32 边界 clamp 引发的类型提升。
+    # fix clamp bug: CIFAR-normalized pixel range is not [0,1]; the old clamp(0,1) amplified the
+    # perturbation projection by 70-77x -> inflated robust / crashed clean. Now use normalized pixel bounds.
+    # dtype follows input x: avoid type promotion when an fp16 input is clamped to fp32 bounds.
     mean = torch.tensor([0.4914, 0.4822, 0.4465], device=device, dtype=dtype).view(3, 1, 1)
     std = torch.tensor([0.2023, 0.1994, 0.2010], device=device, dtype=dtype).view(3, 1, 1)
     low = (0.0 - mean) / std
@@ -69,7 +70,7 @@ def pgd_attack(model: nn.Module, x: torch.Tensor, y: torch.Tensor,
 
 
 def attach_feature_hook(model: nn.Module, layer_name: str):
-    """在指定层后注册 forward hook, 收集特征(不做梯度)。返回 (hook_list, getter)。"""
+    """Register a forward hook after the given layer to collect features (no gradients). Returns (hook_list, getter)."""
     feats = {}
     handles = []
     module = model
@@ -85,7 +86,7 @@ def attach_feature_hook(model: nn.Module, layer_name: str):
 
 def extract_features(model: nn.Module, loader, device, layer_name: str,
                      max_n: int = 3000) -> np.ndarray:
-    """遍历 loader, 提取指定层输出特征, 返回 (N, D) float32 numpy。"""
+    """Iterate the loader and extract the output features of the specified layer; returns (N, D) float32 numpy."""
     model.eval()
     handles, getter = attach_feature_hook(model, layer_name)
     wdtype = next(model.parameters()).dtype
@@ -98,7 +99,7 @@ def extract_features(model: nn.Module, loader, device, layer_name: str,
             if v is None:
                 continue
             v = v.detach().float().cpu().numpy()
-            # 全局平均池化: (B,C,H,W) -> (B,C) 若 4D
+            # global average pooling: (B,C,H,W) -> (B,C) if 4D
             if v.ndim == 4:
                 v = v.reshape(v.shape[0], v.shape[1], -1).mean(2)
             allf.append(v)
@@ -131,7 +132,7 @@ def evaluate_clean_robust(model: nn.Module, loader, device,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BRL E3 几何机制")
+    ap = argparse.ArgumentParser(description="BRL E3 geometric mechanism")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--model", default="resnet18")
     ap.add_argument("--dataset", default="cifar10")
@@ -164,7 +165,7 @@ def main():
     print(f"[E3] ckpt={args.ckpt} device={device} feat_layer={args.feat_layer} "
           f"bits={bits_list}", flush=True)
 
-    # 全精度参考
+    # full-precision reference
     c0, r0 = evaluate_clean_robust(copy.deepcopy(base), loader, device,
                                    eps=args.eps, pgd_iters=args.pgd_iter)
     f0 = extract_features(base, loader, device, args.feat_layer, args.max_feat)
@@ -185,7 +186,7 @@ def main():
         elif 1 < bits < 32:
             m, _ = BQ.ptq_quantize_weights(m, bits, scheme=args.scheme,
                                            per_channel=True, inplace=True)
-        # bits==1: 用 brl_quant 的一维二值化量化权重
+        # bits==1: quantize weights with brl_quant's 1-bit binarization
         elif bits == 1:
             backup = BQ.make_weight_backup(m)
             for mm, w in backup.items():

@@ -1,17 +1,19 @@
 """
-方向A · P0 统一量化包装器 (brl_quant.py)
-==========================================
-面向"位宽-鲁棒景观(BRL)"实验的统一量化工具库。
+Unified quantization wrapper for the BRL (bitwidth-robustness landscape) experiments.
+=========================================================================================
+A unified quantization utility library for the bitwidth-robustness landscape (BRL) study.
 
-设计目标
---------
-1. 支持任意位宽谱 {FP32, FP16, INT8, INT6, INT4, INT3, INT2, INT1}(自定义 fake-quant,
-   不受 torch.ao.quantization 仅 INT8 的限制)。
-2. 支持 PTQ(训练后量化,权重就地替换,冒烟/景观扫描用) 与 QAT(STE 可导, 后续 E4 用)。
-3. per-channel / per-tensor, 对称/非对称, 权重/激活可独立控制(支撑 E2 归因)。
-4. 与数据/攻击解耦, 可被 brl_smoke.py 及各后续实验导入。
+Design goals
+------------
+1. Support an arbitrary bitwidth spectrum {FP32, FP16, INT8, INT6, INT4, INT3, INT2, INT1}
+   with custom fake quantization, not limited to INT8 as in torch.ao.quantization.
+2. Support PTQ (post-training quantization, in-place weight replacement, for smoke tests and
+   landscape scans) and QAT (STE-differentiable, used by E4).
+3. Independent per-channel / per-tensor, symmetric / asymmetric, and weight / activation
+   control (enabling E2 attribution).
+4. Decoupled from data and attacks; importable by brl_smoke.py and all downstream experiments.
 
-仅依赖 PyTorch。默认自动选设备(cuda/cpu)。
+Depends only on PyTorch. The device (cuda/cpu) is chosen automatically by default.
 """
 from __future__ import annotations
 import copy
@@ -25,10 +27,10 @@ __all__ = [
     "make_weight_backup", "MODULE_TYPES",
 ]
 
-#: 一区连续位宽谱(含超低位宽)
+#: Continuous bitwidth spectrum including ultra-low bitwidths
 BITWIDTHS = [32, 16, 8, 6, 4, 3, 2]
 
-#: 需要处理权重的模块类型(卷积/线性)
+#: Module types whose weights are quantized (conv / linear)
 MODULE_TYPES = (nn.Conv2d, nn.Conv1d, nn.Linear)
 
 
@@ -44,20 +46,21 @@ def quantize_tensor(
     ch_dim: int = 0,
     clip: float = None,
 ) -> torch.Tensor:
-    """均匀量化-反量化(确定性, 用于 PTQ)。
+    """Deterministic uniform quantize-dequantize (for PTQ).
 
-    返回与 x 同形状的"量化后重建张量", 数值为浮点但仅含 2^bits 个离散取值。
-    - scheme="sym":  对称 [-qmax, qmax], zp=0, scale=max(|x|)/qmax
-    - scheme="asym": 非对称 [min,max], 有 zero-point
-    - per_channel=True: 沿 ch_dim 逐通道 scale/zero-point(ch_dim=0 适配权重)
-    - clip: 可选的截断百分位(0~1), 抑制离群点(如 clip=0.99)
+    Returns a reconstructed tensor with the same shape as x; values are float but take only
+    2^bits discrete levels.
+    - scheme="sym":  symmetric [-qmax, qmax], zp=0, scale=max(|x|)/qmax
+    - scheme="asym": asymmetric [min,max], with zero-point
+    - per_channel=True: per-channel scale/zero-point along ch_dim (ch_dim=0 fits weights)
+    - clip: optional truncation percentile (0~1) to suppress outliers (e.g. clip=0.99)
     """
     if bits >= 32:
         return x
     if bits == 16:
         return x.half().float()
     if bits == 1 and scheme == "sym":
-        # INT1 对称二值化: 每通道幅度 amp = max|w|(沿除去 ch_dim 外的维度), 权重 -> sign(w)*amp
+        # INT1 symmetric binarization: per-channel magnitude amp = max|w| (over dims except ch_dim), then sign(w)*amp
         max_dims = tuple(d for d in range(x.dim()) if d != ch_dim)
         if per_channel:
             amp = x.abs().amax(dim=max_dims, keepdim=True).clamp_min(1e-8)
@@ -102,9 +105,10 @@ def fake_quant_ste(
     per_channel: bool = True,
     ch_dim: int = 0,
 ) -> torch.Tensor:
-    """straight-through estimator 的可导 fake-quant (QAT 用)。
+    """Differentiable fake-quantization via the straight-through estimator (for QAT).
 
-    forward 返回量化重建值; backward 梯度近似直通(把量化视为恒等)。
+    forward returns the reconstructed quantized value; backward approximates the gradient
+    as if quantization were the identity.
     """
     if bits >= 32:
         return x
@@ -113,14 +117,14 @@ def fake_quant_ste(
 
 
 def set_fp16(model: nn.Module):
-    """FP16 推理(不改变参数, 仅 half)。"""
+    """FP16 inference (parameters unchanged, only half)."""
     model.to(torch.float16)
     model.eval()
     return model
 
 
 def make_weight_backup(model: nn.Module) -> dict:
-    """备份所有 MODULE_TYPES 的权重, 返回 {module: original_weight_tensor}。"""
+    """Back up MODULE_TYPES weights; returns {module: original_weight_tensor}."""
     backup = {}
     for m in model.modules():
         if isinstance(m, MODULE_TYPES) and hasattr(m, "weight"):
@@ -135,9 +139,10 @@ def ptq_quantize_weights(
     per_channel: bool = True,
     inplace: bool = True,
 ):
-    """PTQ: 就地(或返回副本)把 conv/linear 权重替换为量化重建值。
+    """PTQ: replace conv/linear weights with reconstructed quantized values in place (or on a copy).
 
-    返回 (model, backup)。注意: 就地修改会覆盖原有权重; 调用方需用 restore_weights 恢复。
+    Returns (model, backup). Note: in-place modification overwrites the original weights;
+    the caller must use restore_weights to recover them.
     """
     if not inplace:
         model = copy.deepcopy(model)
@@ -151,7 +156,7 @@ def ptq_quantize_weights(
 
 
 def restore_weights(model: nn.Module, backup: dict):
-    """恢复 ptq_quantize_weights 备份的原始权重。"""
+    """Restore the original weights backed up by ptq_quantize_weights."""
     for m, w in backup.items():
         with torch.no_grad():
             m.weight.data = w
@@ -164,10 +169,11 @@ def quantize_activation_inplace(
     per_channel: bool = False,
     modules: tuple = (nn.ReLU,),
 ):
-    """就地替换 ReLU(等激活) 的 forward, 在输出上做确定性激活量化(评估用, 不做 STE)。
+    """Replace the forward of ReLU (etc.) in place, applying deterministic activation
+    quantization to the output (for evaluation only, no STE).
 
-    用于 E2 归因: 权重不变, 仅看激活量化的影响。通过注册临时 module-level hook 实现。
-    返回可调用的 restore 函数。
+    Used by E2 attribution: weights unchanged, only activation quantization is evaluated.
+    Implemented via temporary module-level monkey-patching. Returns a callable restore.
     """
     handles = []
     for m in model.modules():
@@ -192,7 +198,7 @@ def count_params(model: nn.Module) -> int:
 
 
 if __name__ == "__main__":
-    # 单元自检: 确认包装器基本功能正确
+    # Unit self-test: verify the wrapper's basic functionality
     torch.manual_seed(0)
     x = torch.randn(64, 3, 32, 32)
     conv = nn.Conv2d(3, 16, 3, padding=1)
@@ -202,7 +208,7 @@ if __name__ == "__main__":
         diff = (qb - conv.weight.detach()).abs().mean().item()
         n_uniq = qb.unique().numel()
         print(f"bits={b:>3}  reconstruction MAE={diff:.6f}  unique vals={n_uniq}")
-    # QAT 梯度可导检查
+    # QAT gradient differentiability check
     xg = torch.randn(64, 3, 32, 32, requires_grad=True)
     y = fake_quant_ste(xg, 4, "sym", False)
     loss = y.sum()
